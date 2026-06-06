@@ -1,0 +1,767 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>AI Proctor - Secure Interview Monitor</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/face_mesh"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/camera_utils"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs@4.17.0/dist/tf.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@tensorflow-models/coco-ssd@2.2.3/dist/coco-ssd.min.js"></script>
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+    <style>
+        @import url('https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;700&family=Plus+Jakarta+Sans:wght@400;600;800&display=swap');
+        body { font-family: 'Plus Jakarta Sans', sans-serif; background: #020617; color: #f8fafc; overflow-x: hidden; }
+        .status-pill { @apply px-3 py-1 rounded-full text-xs font-bold uppercase tracking-wider flex items-center gap-2; }
+        .status-online  { background:#064e3b; color:#34d399; }
+        .status-warning { background:#78350f; color:#fbbf24; border:1px solid #d97706; }
+        .status-danger  { background:#7f1d1d; color:#f87171; border:1px solid #dc2626; }
+        .terminal-log   { font-family:'JetBrains Mono',monospace; background:rgba(15,23,42,0.8); border:1px solid rgba(51,65,85,0.5); }
+        .video-container { position:relative; box-shadow:0 0 50px -12px rgba(59,130,246,0.25); }
+        .scanning-effect::after { content:""; position:absolute; top:0; left:0; width:100%; height:2px;
+            background:rgba(59,130,246,0.5); box-shadow:0 0 15px #3b82f6; animation:scan 4s linear infinite; }
+        @keyframes scan { 0%{top:0;opacity:0} 5%{opacity:1} 95%{opacity:1} 100%{top:100%;opacity:0} }
+        .modal-overlay { background:rgba(2,6,23,0.95); backdrop-filter:blur(8px); }
+        @keyframes hudPulse { 0%,100%{opacity:1} 50%{opacity:0.35} }
+        .hud-alert { animation:hudPulse 0.9s ease-in-out infinite; }
+        #calibrationBar { transition: width 0.3s ease; }
+    </style>
+</head>
+<body class="min-h-screen">
+
+<!-- Onboarding Modal -->
+<div id="onboardingModal" class="fixed inset-0 z-[110] modal-overlay flex items-center justify-center p-4">
+    <div class="bg-slate-900 border border-slate-700 w-full max-w-lg rounded-3xl p-8 shadow-2xl">
+        <div class="flex items-center gap-4 mb-8">
+            <div class="w-12 h-12 bg-blue-600 rounded-xl flex items-center justify-center">
+                <i class="fa-solid fa-id-card text-white text-xl"></i>
+            </div>
+            <div>
+                <h2 class="text-2xl font-black tracking-tight">Candidate Profile</h2>
+                <p class="text-slate-400 text-sm">Enter your details to initialize the secure session.</p>
+            </div>
+        </div>
+        <form id="onboardingForm" class="space-y-5">
+            <div>
+                <label class="block text-xs font-bold text-slate-500 uppercase mb-2">Full Name</label>
+                <input type="text" id="inputName" required placeholder="e.g. Alex Thompson"
+                    class="w-full bg-slate-800 border border-slate-700 rounded-xl px-4 py-3 focus:outline-none focus:ring-2 focus:ring-blue-500 text-white">
+            </div>
+            <div>
+                <label class="block text-xs font-bold text-slate-500 uppercase mb-2">Email Address</label>
+                <input type="email" id="inputEmail" required placeholder="alex@example.com"
+                    class="w-full bg-slate-800 border border-slate-700 rounded-xl px-4 py-3 focus:outline-none focus:ring-2 focus:ring-blue-500 text-white">
+            </div>
+            <div>
+                <label class="block text-xs font-bold text-slate-500 uppercase mb-2">Identification Number / ID</label>
+                <input type="text" id="inputID" required placeholder="EMP-12345"
+                    class="w-full bg-slate-800 border border-slate-700 rounded-xl px-4 py-3 focus:outline-none focus:ring-2 focus:ring-blue-500 text-white">
+            </div>
+            <button type="submit" class="w-full py-4 bg-blue-600 hover:bg-blue-500 rounded-2xl font-bold transition-all mt-4 flex items-center justify-center gap-2">
+                Verify & Proceed <i class="fa-solid fa-arrow-right"></i>
+            </button>
+        </form>
+    </div>
+</div>
+
+<!-- Header -->
+<nav class="border-b border-slate-800 bg-slate-900/50 backdrop-blur-md sticky top-0 z-50">
+    <div class="max-w-7xl mx-auto px-4 h-16 flex items-center justify-between">
+        <div class="flex items-center gap-3">
+            <div class="w-10 h-10 bg-blue-600 rounded-lg flex items-center justify-center">
+                <i class="fa-solid fa-eye text-white text-xl"></i>
+            </div>
+            <span class="text-xl font-extrabold tracking-tight">AI<span class="text-blue-500">PROCTOR</span></span>
+        </div>
+        <div class="flex items-center gap-6">
+            <div id="connectionStatus" class="status-pill status-online">
+                <span class="relative flex h-2 w-2">
+                    <span class="animate-ping absolute inline-flex h-full w-full rounded-full bg-emerald-400 opacity-75"></span>
+                    <span class="relative inline-flex rounded-full h-2 w-2 bg-emerald-500"></span>
+                </span>
+                System Live
+            </div>
+            <div class="h-6 w-px bg-slate-700"></div>
+            <div class="flex items-center gap-2 text-slate-400 text-sm">
+                <i class="fa-solid fa-user-shield"></i>
+                <span id="headerSessionId">Secure Session #8821</span>
+            </div>
+        </div>
+    </div>
+</nav>
+
+<main class="max-w-7xl mx-auto p-4 md:p-8 grid grid-cols-1 lg:grid-cols-12 gap-8">
+
+    <!-- Left: Video -->
+    <div class="lg:col-span-8 space-y-6">
+
+        <!-- Calibration Banner -->
+        <div id="calibrationBanner" class="hidden bg-blue-900/40 border border-blue-500/40 rounded-2xl p-4 flex items-center gap-4">
+            <i class="fa-solid fa-crosshairs text-blue-400 text-xl animate-spin"></i>
+            <div class="flex-1">
+                <div class="text-sm font-bold text-blue-300 mb-1">Calibrating — Look straight at the screen and stay still</div>
+                <div class="w-full bg-slate-700 h-2 rounded-full overflow-hidden">
+                    <div id="calibrationBar" class="bg-blue-500 h-full" style="width:0%"></div>
+                </div>
+            </div>
+            <div id="calibrationPct" class="text-blue-400 font-mono text-sm font-bold">0%</div>
+        </div>
+
+        <div class="video-container rounded-3xl overflow-hidden bg-slate-900 aspect-video relative border-2 border-slate-800" id="mainContainer">
+            <video id="inputVideo" class="w-full h-full object-cover" autoplay playsinline muted></video>
+            <canvas id="outputCanvas" class="absolute inset-0 w-full h-full"></canvas>
+
+            <!-- HUD Left -->
+            <div class="absolute top-6 left-6 flex flex-col gap-2">
+                <div class="bg-black/50 backdrop-blur-sm p-3 rounded-xl border border-white/10 flex items-center gap-3">
+                    <div class="text-xs font-bold text-slate-400">GAZE</div>
+                    <div id="gazeIndicator" class="h-2 w-2 rounded-full bg-emerald-500 shadow-[0_0_8px_#10b981]"></div>
+                    <div id="poseIndicator" class="text-xs font-mono text-blue-400">STABLE</div>
+                </div>
+                <div class="bg-black/50 backdrop-blur-sm p-3 rounded-xl border border-white/10 flex items-center gap-3">
+                    <div class="text-xs font-bold text-slate-400">PERSONS</div>
+                    <div id="faceCountIndicator" class="text-xs font-mono text-emerald-400">—</div>
+                </div>
+                <div class="bg-black/50 backdrop-blur-sm p-3 rounded-xl border border-white/10 flex items-center gap-3">
+                    <div class="text-xs font-bold text-slate-400">PHONE</div>
+                    <div id="phoneIndicator" class="text-xs font-mono text-slate-500">LOADING</div>
+                </div>
+            </div>
+
+            <!-- HUD Right: Suspicion Meter -->
+            <div class="absolute top-6 right-6">
+                <div class="bg-black/50 backdrop-blur-sm p-3 rounded-xl border border-white/10">
+                    <div class="text-xs font-bold text-slate-400 mb-2">SUSPICION</div>
+                    <div class="w-24 bg-slate-700 h-2 rounded-full overflow-hidden">
+                        <div id="suspicionBar" class="bg-emerald-500 h-full transition-all duration-500" style="width:0%"></div>
+                    </div>
+                    <div id="suspicionPct" class="text-[10px] font-mono text-slate-500 mt-1 text-right">0%</div>
+                </div>
+            </div>
+
+            <div class="scanning-effect"></div>
+        </div>
+
+        <!-- Session Info -->
+        <div class="grid grid-cols-1 md:grid-cols-3 gap-4">
+            <div class="bg-slate-900/50 p-4 rounded-2xl border border-slate-800">
+                <div class="text-xs font-bold text-slate-500 mb-1">CANDIDATE</div>
+                <div id="displayCandidateName" class="font-semibold truncate">Not Registered</div>
+            </div>
+            <div class="bg-slate-900/50 p-4 rounded-2xl border border-slate-800">
+                <div class="text-xs font-bold text-slate-500 mb-1">SESSION DURATION</div>
+                <div id="timerDisplay" class="font-mono text-xl text-blue-400 font-bold">00:00:00</div>
+            </div>
+            <div class="bg-slate-900/50 p-4 rounded-2xl border border-slate-800 flex items-center justify-between">
+                <div>
+                    <div class="text-xs font-bold text-slate-500 mb-1">VIOLATIONS</div>
+                    <div id="violationCount" class="text-2xl font-black text-white">0 / 2</div>
+                </div>
+                <div class="h-10 w-10 bg-red-500/10 rounded-full flex items-center justify-center text-red-500">
+                    <i class="fa-solid fa-triangle-exclamation"></i>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Right: Log -->
+    <div class="lg:col-span-4 flex flex-col gap-6">
+        <div class="bg-slate-900 rounded-3xl border border-slate-800 flex-1 flex flex-col overflow-hidden">
+            <div class="p-4 border-b border-slate-800 flex items-center justify-between bg-slate-800/20">
+                <h2 class="font-bold flex items-center gap-2">
+                    <i class="fa-solid fa-list-check text-blue-400"></i>
+                    Live Behavior Log
+                </h2>
+                <span class="text-[10px] text-slate-500 font-bold uppercase tracking-widest">HR Dashboard</span>
+            </div>
+            <div id="behaviorLogs" class="flex-1 p-4 overflow-y-auto space-y-3 terminal-log text-[13px]">
+                <div class="text-slate-500">[SYSTEM] Awaiting candidate registration...</div>
+            </div>
+            <div class="p-4 bg-slate-800/30">
+                <div class="flex items-center justify-between mb-2">
+                    <span class="text-xs font-bold text-slate-400">AI CONFIDENCE</span>
+                    <span class="text-xs font-mono text-emerald-400" id="aiConfidence">—</span>
+                </div>
+                <div class="w-full bg-slate-700 h-1.5 rounded-full overflow-hidden">
+                    <div id="aiConfBar" class="bg-blue-500 h-full" style="width:0%"></div>
+                </div>
+            </div>
+        </div>
+        <button id="btnStart" disabled class="w-full py-4 bg-blue-600 hover:bg-blue-500 rounded-2xl font-bold transition-all shadow-xl shadow-blue-900/20 flex items-center justify-center gap-3 opacity-50 cursor-not-allowed">
+            <i class="fa-solid fa-play"></i> Start Interview
+        </button>
+    </div>
+</main>
+
+<!-- Warning Modal -->
+<div id="warningModal" class="fixed inset-0 z-[100] modal-overlay flex items-center justify-center hidden p-4">
+    <div class="bg-slate-900 border border-amber-500/50 w-full max-w-md rounded-3xl p-8 shadow-2xl text-center">
+        <div class="w-20 h-20 bg-amber-500/10 rounded-full flex items-center justify-center text-amber-500 mx-auto mb-6 border-2 border-amber-500/20">
+            <i class="fa-solid fa-circle-exclamation text-4xl animate-pulse"></i>
+        </div>
+        <h2 class="text-2xl font-black mb-2 text-amber-500 uppercase tracking-tight">Warning Issued</h2>
+        <p id="warningDescription" class="text-slate-400 mb-8">Suspicious behavior detected.</p>
+        <button id="btnAcknowledge" class="w-full py-4 bg-amber-600 hover:bg-amber-500 text-white rounded-2xl font-bold transition-all">
+            I Understand
+        </button>
+        <p class="mt-4 text-xs text-slate-500 uppercase font-bold">One attempt remaining</p>
+    </div>
+</div>
+
+<!-- Termination Modal -->
+<div id="terminationModal" class="fixed inset-0 z-[101] modal-overlay flex items-center justify-center hidden p-4">
+    <div class="bg-slate-900 border border-red-500/50 w-full max-w-md rounded-3xl p-10 shadow-2xl text-center">
+        <div class="w-20 h-20 bg-red-500/10 rounded-full flex items-center justify-center text-red-500 mx-auto mb-6 border-2 border-red-500/20">
+            <i class="fa-solid fa-user-xmark text-4xl"></i>
+        </div>
+        <h2 class="text-3xl font-black mb-2 text-red-500 uppercase tracking-tight">Disqualified</h2>
+        <p class="text-slate-400 mb-8">Session terminated due to repeated policy violations.</p>
+        <div class="p-4 bg-red-950/20 rounded-2xl border border-red-500/20 mb-8 text-left">
+            <div class="text-xs font-bold text-red-400 uppercase mb-1">Candidate Details</div>
+            <div id="terminationCandidateInfo" class="text-sm text-slate-300 mb-3 font-mono"></div>
+            <div class="text-xs font-bold text-red-400 uppercase mb-1">Primary Reason</div>
+            <div id="terminationReason" class="text-sm text-slate-300">Multiple violations detected.</div>
+        </div>
+        <button onclick="window.location.reload()" class="text-slate-500 hover:text-white transition-all text-sm font-bold uppercase">
+            Exit System
+        </button>
+    </div>
+</div>
+
+<script type="module">
+
+// ═══════════════════════════════════════════════════════════════════════
+//  DOM
+// ═══════════════════════════════════════════════════════════════════════
+const videoEl         = document.getElementById('inputVideo');
+const canvasEl        = document.getElementById('outputCanvas');
+const ctx             = canvasEl.getContext('2d');
+const logsEl          = document.getElementById('behaviorLogs');
+const violationDisp   = document.getElementById('violationCount');
+const timerDisp       = document.getElementById('timerDisplay');
+const warningModal    = document.getElementById('warningModal');
+const termModal       = document.getElementById('terminationModal');
+const poseInd         = document.getElementById('poseIndicator');
+const gazeInd         = document.getElementById('gazeIndicator');
+const faceCountInd    = document.getElementById('faceCountIndicator');
+const phoneInd        = document.getElementById('phoneIndicator');
+const suspBar         = document.getElementById('suspicionBar');
+const suspPct         = document.getElementById('suspicionPct');
+const calBanner       = document.getElementById('calibrationBanner');
+const calBar          = document.getElementById('calibrationBar');
+const calPct          = document.getElementById('calibrationPct');
+const aiConf          = document.getElementById('aiConfidence');
+const aiConfBar       = document.getElementById('aiConfBar');
+const onboardModal    = document.getElementById('onboardingModal');
+const onboardForm     = document.getElementById('onboardingForm');
+const candidateName   = document.getElementById('displayCandidateName');
+const btnStart        = document.getElementById('btnStart');
+
+// ═══════════════════════════════════════════════════════════════════════
+//  SESSION STATE
+// ═══════════════════════════════════════════════════════════════════════
+let candidateData    = null;
+let violations       = 0;
+let isActive         = false;       // true = monitoring live
+let isCalibrating    = false;       // true = calibration phase
+let calibrated       = false;       // calibration done
+let sessionStart     = null;
+let warningActive    = false;
+
+// ═══════════════════════════════════════════════════════════════════════
+//  CALIBRATION
+//  We collect 90 frames (~3s) of the candidate looking straight at the
+//  camera to build a personal baseline for yaw, pitch and iris offsets.
+//  This eliminates false-positives caused by face geometry differences.
+// ═══════════════════════════════════════════════════════════════════════
+const CAL_FRAMES  = 90;
+const calSamples  = { yaw: [], pitch: [], iris: [] };
+let   calFrame    = 0;
+
+// Personal baseline (set after calibration)
+let baseYaw   = 0;
+let basePitch = 0;
+let baseIris  = 0;
+
+// How many standard deviations above baseline = suspicious
+// Higher = more lenient. 2.5 SD is a clear intentional movement.
+const GAZE_SD_THRESHOLD = 2.5;
+
+function mean(arr)   { return arr.reduce((a, b) => a + b, 0) / arr.length; }
+function stddev(arr) {
+    const m = mean(arr);
+    return Math.sqrt(arr.reduce((s, v) => s + (v - m) ** 2, 0) / arr.length);
+}
+
+// Stored SD values per axis (used to scale deviations)
+let sdYaw = 0.02, sdPitch = 0.02, sdIris = 0.015; // safe defaults before calibration
+
+// ═══════════════════════════════════════════════════════════════════════
+//  GAZE / HEAD-POSE COMPUTATION
+//  Uses nose tip, eye corners, and iris centres.
+//  Returns { yaw, pitch, irisOff } — all in normalised face units.
+// ═══════════════════════════════════════════════════════════════════════
+function computeHeadMetrics(lm) {
+    // Head yaw: horizontal offset of nose from eye midpoint
+    const nose   = lm[1];
+    const lEyeC  = lm[33];   // left eye outer corner
+    const rEyeC  = lm[263];  // right eye outer corner
+    const eyeMX  = (lEyeC.x + rEyeC.x) / 2;
+    const eyeMY  = (lEyeC.y + rEyeC.y) / 2;
+    const yaw    = nose.x - eyeMX;
+    const pitch  = nose.y - eyeMY;   // positive = looking down
+
+    // Iris offset: average horizontal deviation of irises from their eye-box centre
+    // Left eye box: lm[33] outer, lm[133] inner
+    const lOuter  = lm[33];
+    const lInner  = lm[133];
+    const lIris   = lm[468];
+    const lCentX  = (lOuter.x + lInner.x) / 2;
+    const lOff    = lIris.x - lCentX;   // signed: + = looking right
+
+    // Right eye box: lm[362] inner, lm[263] outer
+    const rInner  = lm[362];
+    const rOuter  = lm[263];
+    const rIris   = lm[473];
+    const rCentX  = (rInner.x + rOuter.x) / 2;
+    const rOff    = rIris.x - rCentX;
+
+    // Average unsigned deviation — direction differs between eyes when looking sideways
+    const irisOff = (Math.abs(lOff) + Math.abs(rOff)) / 2;
+
+    return { yaw, pitch, irisOff };
+}
+
+// ═══════════════════════════════════════════════════════════════════════
+//  SUSPICION SCORING — relative to personal baseline
+//  Returns a suspicion score 0..1 combining yaw, pitch, iris.
+// ═══════════════════════════════════════════════════════════════════════
+function suspicionScore(yaw, pitch, irisOff) {
+    // How many SDs away from personal baseline is each axis?
+    const yawZ   = Math.abs(yaw   - baseYaw)   / Math.max(sdYaw,   0.005);
+    const pitchZ = Math.abs(pitch - basePitch)  / Math.max(sdPitch, 0.005);
+    // Pitch only counts when looking DOWN (phone under desk)
+    const pitchZDown = (pitch - basePitch) > 0 ? pitchZ : 0;
+    const irisZ  = Math.abs(irisOff - baseIris) / Math.max(sdIris,  0.003);
+
+    // Weight: head yaw 40%, iris 40%, pitch-down 20%
+    const combined = yawZ * 0.4 + irisZ * 0.4 + pitchZDown * 0.2;
+
+    // Normalise to 0..1 with SD threshold as the "fully suspicious" level
+    return Math.min(combined / GAZE_SD_THRESHOLD, 1.0);
+}
+
+// ═══════════════════════════════════════════════════════════════════════
+//  ROLLING SUSPICION ACCUMULATOR
+//  A brief glance is forgiven.  Only sustained deviation triggers.
+// ═══════════════════════════════════════════════════════════════════════
+const GAZE_WINDOW_MS     = 12000;  // 12 s rolling window
+const GAZE_GRACE_MS      = 1200;   // first 1.2 s of any look-away is grace
+const GAZE_FIRE_FRACTION = 0.50;   // >50% of window must be suspicious to fire
+                                   // (after calibration — user must look away most of the time)
+
+const gazeHistory = [];            // { t, score }
+let   lookAwayStart = null;
+
+function pushGaze(rawScore) {
+    const now     = Date.now();
+    let   counted = rawScore;
+
+    // Grace: if look-away just started, don't count yet
+    if (rawScore > 0.5) {
+        if (!lookAwayStart) lookAwayStart = now;
+        if (now - lookAwayStart < GAZE_GRACE_MS) counted = 0;
+    } else {
+        lookAwayStart = null;
+    }
+
+    gazeHistory.push({ t: now, score: counted });
+
+    // Evict old entries
+    const cutoff = now - GAZE_WINDOW_MS;
+    while (gazeHistory.length && gazeHistory[0].t < cutoff) gazeHistory.shift();
+
+    if (!gazeHistory.length) return 0;
+    const avg = gazeHistory.reduce((s, r) => s + r.score, 0) / gazeHistory.length;
+    return avg;
+}
+
+// ═══════════════════════════════════════════════════════════════════════
+//  PHONE DETECTION — COCO-SSD
+//  Key fixes vs old code:
+//  1. Runs independently of warningActive so phone can still be caught
+//     after first warning.
+//  2. Lower confidence threshold (0.35) — phones are often partially
+//     visible or at an angle.
+//  3. Larger offscreen canvas (480x360) for better detection accuracy.
+//  4. 3-out-of-5 majority vote instead of strict consecutive frames,
+//     eliminating both false positives AND missed detections.
+// ═══════════════════════════════════════════════════════════════════════
+let   cocoModel      = null;
+let   phoneFrameN    = 0;
+const PHONE_INTERVAL = 8;            // check every 8 face-mesh frames (~4x/sec)
+
+// Majority vote buffer: last 3 detections (true/false)
+const phoneVotes     = [];
+const PHONE_WIN_SIZE = 3;
+const PHONE_VOTES_TO_FIRE = 2;      // 2 out of 3 = phone confirmed (~0.5s)
+
+const offCanvas     = document.createElement('canvas');
+offCanvas.width     = 480;
+offCanvas.height    = 360;
+const offCtx        = offCanvas.getContext('2d');
+
+// Cooldown: phone can re-trigger after warning is acknowledged
+let lastPhoneViolation = 0;
+const PHONE_RECOOL_MS  = 15000;    // 15 s between phone violations
+
+async function loadModel() {
+    try {
+        // Use mobilenet_v2 (full) — better accuracy for partially-visible phones
+        cocoModel = await cocoSsd.load({ base: 'mobilenet_v2' });
+        phoneInd.innerText  = 'CLEAR';
+        phoneInd.className  = 'text-xs font-mono text-emerald-400';
+        addLog('Phone detection model ready.', 'info');
+        updateAiConf(98);
+    } catch (e) {
+        phoneInd.innerText  = 'N/A';
+        phoneInd.className  = 'text-xs font-mono text-slate-500';
+        addLog('Phone detection unavailable (model load failed).', 'warn');
+    }
+}
+
+async function runPhoneDetection() {
+    if (!cocoModel) return;
+    try {
+        offCtx.drawImage(videoEl, 0, 0, 480, 360);
+        const preds = await cocoModel.detect(offCanvas);
+        const found = preds.some(p => p.class === 'cell phone' && p.score > 0.35);
+
+        phoneVotes.push(found);
+        if (phoneVotes.length > PHONE_WIN_SIZE) phoneVotes.shift();
+
+        const votes = phoneVotes.filter(Boolean).length;
+
+        if (found) {
+            phoneInd.innerText = 'DETECTED';
+            phoneInd.className = 'text-xs font-mono text-red-400 hud-alert';
+        } else {
+            phoneInd.innerText = 'CLEAR';
+            phoneInd.className = 'text-xs font-mono text-emerald-400';
+        }
+
+        // Fire violation: majority vote confirms phone
+        if (votes >= PHONE_VOTES_TO_FIRE) {
+            const now = Date.now();
+            if (now - lastPhoneViolation > PHONE_RECOOL_MS) {
+                lastPhoneViolation = now;
+                phoneVotes.length  = 0; // reset votes
+                triggerViolation('Mobile phone detected in camera frame.', 'phone');
+            }
+        }
+    } catch (_) { /* silently ignore frame errors */ }
+}
+
+// ═══════════════════════════════════════════════════════════════════════
+//  MULTI-FACE (multiple persons)
+// ═══════════════════════════════════════════════════════════════════════
+let multiFaceFrames = 0;
+const MULTI_FACE_CONFIRM = 25;   // ~0.8 s continuous before triggering
+
+// ═══════════════════════════════════════════════════════════════════════
+//  FACE AWAY (no face detected)
+// ═══════════════════════════════════════════════════════════════════════
+let awayFrames = 0;
+const AWAY_THRESHOLD = 70; // ~2.3 s at 30 fps
+
+// ═══════════════════════════════════════════════════════════════════════
+//  COOLDOWN TABLE — per category (seconds between violations)
+// ═══════════════════════════════════════════════════════════════════════
+const cooldowns = { gaze: 0, phone: 0, persons: 0, away: 0 };
+const COOLDOWN_MS = 10000;
+
+function canFire(cat) { return Date.now() - cooldowns[cat] > COOLDOWN_MS; }
+function markFired(cat) { cooldowns[cat] = Date.now(); }
+
+// ═══════════════════════════════════════════════════════════════════════
+//  VIOLATION HANDLER
+// ═══════════════════════════════════════════════════════════════════════
+function triggerViolation(reason, category) {
+    if (!isActive) return;
+    // Phone can fire even during warningActive (it's a separate serious issue)
+    if (category !== 'phone' && warningActive) return;
+    if (!canFire(category)) return;
+    markFired(category);
+
+    violations++;
+    violationDisp.innerText = `${violations} / 2`;
+    addLog(`VIOLATION [${category.toUpperCase()}]: ${reason}`, 'violation');
+
+    if (violations === 1) {
+        warningActive = true;
+        document.getElementById('warningDescription').innerText =
+            `Suspicious behavior detected: ${reason}`;
+        warningModal.classList.remove('hidden');
+        document.getElementById('connectionStatus').className = 'status-pill status-warning';
+    } else if (violations >= 2) {
+        isActive = false;
+        document.getElementById('terminationCandidateInfo').innerText =
+            `NAME: ${candidateData.name}\nEMAIL: ${candidateData.email}\nID: ${candidateData.id}`;
+        document.getElementById('terminationReason').innerText = reason;
+        termModal.classList.remove('hidden');
+        document.getElementById('connectionStatus').className = 'status-pill status-danger';
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════════════
+//  MEDIAPIPE FACE MESH  (up to 4 faces for multi-person detection)
+// ═══════════════════════════════════════════════════════════════════════
+const faceMesh = new FaceMesh({
+    locateFile: f => `https://cdn.jsdelivr.net/npm/@mediapipe/face_mesh/${f}`,
+});
+faceMesh.setOptions({
+    maxNumFaces: 4,
+    refineLandmarks: true,      // needed for iris landmarks 468 / 473
+    minDetectionConfidence: 0.5,
+    minTrackingConfidence: 0.5,
+});
+
+faceMesh.onResults(async results => {
+    ctx.save();
+    ctx.clearRect(0, 0, canvasEl.width, canvasEl.height);
+
+    const faces = results.multiFaceLandmarks || [];
+    const nFaces = faces.length;
+
+    // ── Update PERSONS HUD ──────────────────────────────────────────
+    faceCountInd.innerText = nFaces > 0 ? String(nFaces) : '0';
+    faceCountInd.className = nFaces > 1
+        ? 'text-xs font-mono text-red-400 hud-alert'
+        : nFaces === 1
+            ? 'text-xs font-mono text-emerald-400'
+            : 'text-xs font-mono text-amber-400';
+
+    // ── Multi-person check ──────────────────────────────────────────
+    if (isActive) {
+        if (nFaces > 1) {
+            multiFaceFrames++;
+            if (multiFaceFrames >= MULTI_FACE_CONFIRM) {
+                multiFaceFrames = 0;
+                triggerViolation(
+                    `${nFaces} persons detected in frame. Only the registered candidate is allowed.`,
+                    'persons'
+                );
+            }
+        } else {
+            multiFaceFrames = 0;
+        }
+
+        // Draw red boxes around extra faces
+        for (let i = 1; i < nFaces; i++) {
+            const lm = faces[i];
+            let x0=1, x1=0, y0=1, y1=0;
+            lm.forEach(p => {
+                if (p.x < x0) x0 = p.x; if (p.x > x1) x1 = p.x;
+                if (p.y < y0) y0 = p.y; if (p.y > y1) y1 = p.y;
+            });
+            const W = canvasEl.width, H = canvasEl.height;
+            ctx.strokeStyle = 'rgba(239,68,68,0.9)';
+            ctx.lineWidth   = 2;
+            ctx.strokeRect(x0*W, y0*H, (x1-x0)*W, (y1-y0)*H);
+            ctx.fillStyle   = 'rgba(239,68,68,0.9)';
+            ctx.font        = 'bold 13px monospace';
+            ctx.fillText('EXTRA PERSON', x0*W + 4, y0*H - 6);
+        }
+    }
+
+    // ── Phone detection (throttled) ─────────────────────────────────
+    phoneFrameN++;
+    if (isActive && phoneFrameN % PHONE_INTERVAL === 0) {
+        runPhoneDetection(); // non-blocking, runs in background
+    }
+
+    // ── Primary face ────────────────────────────────────────────────
+    if (nFaces > 0) {
+        awayFrames = 0;
+        const lm = faces[0];
+
+        // Draw iris dots
+        ctx.fillStyle = 'rgba(59,130,246,0.7)';
+        [468, 473].forEach(i => {
+            const p = lm[i];
+            ctx.beginPath();
+            ctx.arc(p.x * canvasEl.width, p.y * canvasEl.height, 4, 0, 2*Math.PI);
+            ctx.fill();
+        });
+
+        const { yaw, pitch, irisOff } = computeHeadMetrics(lm);
+
+        // ── CALIBRATION PHASE ─────────────────────────────────────
+        if (isCalibrating) {
+            calSamples.yaw.push(yaw);
+            calSamples.pitch.push(pitch);
+            calSamples.iris.push(irisOff);
+            calFrame++;
+
+            const pct = Math.round((calFrame / CAL_FRAMES) * 100);
+            calBar.style.width  = pct + '%';
+            calPct.innerText    = pct + '%';
+
+            if (calFrame >= CAL_FRAMES) {
+                // Compute baseline and SD
+                baseYaw   = mean(calSamples.yaw);
+                basePitch = mean(calSamples.pitch);
+                baseIris  = mean(calSamples.iris);
+                sdYaw     = Math.max(stddev(calSamples.yaw),   0.005);
+                sdPitch   = Math.max(stddev(calSamples.pitch), 0.005);
+                sdIris    = Math.max(stddev(calSamples.iris),  0.003);
+
+                isCalibrating = false;
+                calibrated    = true;
+                isActive      = true;
+                calBanner.classList.add('hidden');
+                addLog('Calibration complete. Personal baseline set.', 'info');
+                addLog(`Monitoring active for ${candidateData.name}.`);
+            }
+            ctx.restore();
+            return;
+        }
+
+        // ── GAZE ANALYSIS (post-calibration only) ─────────────────
+        if (isActive && calibrated) {
+            const score   = suspicionScore(yaw, pitch, irisOff);
+            const rolAvg  = pushGaze(score);
+
+            const pct = Math.round(rolAvg * 100);
+            suspBar.style.width = pct + '%';
+            suspPct.innerText   = pct + '%';
+            suspBar.className   =
+                pct > 55 ? 'bg-red-500 h-full transition-all duration-500'
+                : pct > 30 ? 'bg-amber-400 h-full transition-all duration-500'
+                : 'bg-emerald-500 h-full transition-all duration-500';
+
+            if (score > 0.5) {
+                poseInd.innerText  = 'SUSPICIOUS';
+                poseInd.className  = 'text-xs font-mono text-amber-400';
+                gazeInd.className  = 'h-2 w-2 rounded-full bg-amber-400 shadow-[0_0_8px_#fbbf24]';
+            } else {
+                poseInd.innerText  = 'STABLE';
+                poseInd.className  = 'text-xs font-mono text-emerald-400';
+                gazeInd.className  = 'h-2 w-2 rounded-full bg-emerald-500 shadow-[0_0_8px_#10b981]';
+            }
+
+            if (rolAvg > GAZE_FIRE_FRACTION && canFire('gaze')) {
+                triggerViolation(
+                    `Sustained suspicious gaze (${pct}% of last ${GAZE_WINDOW_MS/1000}s). Looking away from screen repeatedly.`,
+                    'gaze'
+                );
+                gazeHistory.length = 0;
+            }
+        }
+
+    } else {
+        // No face in frame
+        poseInd.innerText  = 'NO FACE';
+        poseInd.className  = 'text-xs font-mono text-red-400';
+        gazeInd.className  = 'h-2 w-2 rounded-full bg-red-500 shadow-[0_0_8px_#ef4444]';
+        suspBar.style.width = '0%';
+        suspPct.innerText   = '0%';
+        pushGaze(0);
+
+        if (isActive) {
+            awayFrames++;
+            if (awayFrames > AWAY_THRESHOLD) {
+                awayFrames = 0;
+                triggerViolation('Face moved out of camera frame.', 'away');
+            }
+        }
+    }
+
+    ctx.restore();
+});
+
+// ═══════════════════════════════════════════════════════════════════════
+//  CAMERA
+// ═══════════════════════════════════════════════════════════════════════
+const camera = new Camera(videoEl, {
+    onFrame: async () => { await faceMesh.send({ image: videoEl }); },
+    width: 640, height: 480,
+});
+
+// ═══════════════════════════════════════════════════════════════════════
+//  ONBOARDING
+// ═══════════════════════════════════════════════════════════════════════
+onboardForm.addEventListener('submit', e => {
+    e.preventDefault();
+    candidateData = {
+        name:  document.getElementById('inputName').value,
+        email: document.getElementById('inputEmail').value,
+        id:    document.getElementById('inputID').value,
+    };
+    candidateName.innerText = candidateData.name;
+    onboardModal.classList.add('hidden');
+    btnStart.disabled = false;
+    btnStart.classList.remove('opacity-50', 'cursor-not-allowed');
+    addLog(`Candidate registered: ${candidateData.name} (${candidateData.id})`);
+});
+
+// ═══════════════════════════════════════════════════════════════════════
+//  BUTTONS
+// ═══════════════════════════════════════════════════════════════════════
+btnStart.addEventListener('click', async () => {
+    canvasEl.width  = videoEl.videoWidth  || 640;
+    canvasEl.height = videoEl.videoHeight || 480;
+    try {
+        await camera.start();
+        sessionStart  = Date.now();
+        isCalibrating = true;
+        calBanner.classList.remove('hidden');
+        btnStart.disabled = true;
+        btnStart.classList.add('opacity-50');
+        addLog('Camera started. Running personal calibration (3 seconds)...');
+        setInterval(updateTimer, 1000);
+        loadModel();   // load phone detector in background
+    } catch (e) {
+        alert('Camera access is required for proctoring.');
+    }
+});
+
+document.getElementById('btnAcknowledge').addEventListener('click', () => {
+    warningModal.classList.add('hidden');
+    warningActive      = false;
+    gazeHistory.length = 0;
+    lookAwayStart      = null;
+    addLog('Warning acknowledged. Monitoring resumed.');
+});
+
+// ═══════════════════════════════════════════════════════════════════════
+//  UI HELPERS
+// ═══════════════════════════════════════════════════════════════════════
+function addLog(msg, type = 'info') {
+    const t   = new Date().toLocaleTimeString([], { hour12:false, hour:'2-digit', minute:'2-digit', second:'2-digit' });
+    const div = document.createElement('div');
+    div.className = type === 'violation' ? 'text-red-400 font-bold'
+                  : type === 'warn'      ? 'text-amber-400'
+                  : 'text-slate-400';
+    div.innerHTML = `<span class="text-slate-600">[${t}]</span> ${msg}`;
+    logsEl.appendChild(div);
+    logsEl.scrollTop = logsEl.scrollHeight;
+}
+
+function updateTimer() {
+    if (!sessionStart) return;
+    const d = new Date(Date.now() - sessionStart);
+    timerDisp.innerText = [d.getUTCHours(), d.getUTCMinutes(), d.getUTCSeconds()]
+        .map(n => String(n).padStart(2,'0')).join(':');
+}
+
+function updateAiConf(pct) {
+    aiConf.innerText        = pct + '%';
+    aiConfBar.style.width   = pct + '%';
+}
+updateAiConf(0);
+
+</script>
+</body>
+</html>
